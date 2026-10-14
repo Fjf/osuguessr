@@ -1,0 +1,18 @@
+services:
+  osuguessr:
+    build: .
+    container_name: osuguessr
+    restart: unless-stopped
+    ports:
+      - "${HOST:-0.0.0.0}:${PORT:-8090}:8080"
+    environment:
+      SONGS_DIR: /data/songs
+      BEATMAPS_DIR: /data/osu
+      DB_PATH: /data/app/osuguessr.db
+    volumes:
+      # Your osu! audio files (read-only). Default: standard Windows install.
+      - '${OSU_SONGS_DIR:-G:\Program Files\osu!\Songs}:/data/songs:ro'
+      # Your osu! root folder, so beatmap files give title/artist/mapper/difficulty.
+      - '${OSU_ROOT_DIR:-G:\Program Files\osu!}:/data/osu:ro'
+      # Persisted SQLite index (survives restarts; reindex via the UI button).
+      - ./data:/data/app
