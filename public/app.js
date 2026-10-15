@@ -1,5 +1,7 @@
 // osuguessr — client game logic (vanilla JS, no build step).
 
+import { audioBufferSilenceOffset } from './silence.js';
+
 const CLIPS = [0.1, 0.5, 2, 8, 15]; // seconds, per successive play press
 const POINTS = [100, 80, 60, 40, 20];
 
@@ -31,7 +33,7 @@ const state = {
 };
 
 let audioCtx = null;
-const bufferCache = new Map(); // songId -> AudioBuffer | { fallback: true, bytes }
+const bufferCache = new Map(); // songId -> { buffer: AudioBuffer, offset: number } | { fallback: true, bytes }
 
 // ---------- persistence ----------
 
@@ -146,6 +148,7 @@ async function pollIndexInner() {
     $('#indexing-title').textContent = 'Building song index…';
     const phases = {
       start: 'Starting…',
+      realm: 'Opening beatmap database…',
       songs: 'Scanning audio files…',
       beatmaps: 'Parsing beatmaps…',
       tags: 'Reading embedded tags for unmatched songs…',
@@ -200,13 +203,25 @@ async function loadBuffer(id) {
   try {
     const ctx = await getCtx();
     const ab = await ctx.decodeAudioData(bytes);
-    cacheSet(id, ab);
-    return ab;
+    // osu! tracks often open with dead air — remember where the audio
+    // actually starts so clips can skip straight to it.
+    const entry = { buffer: ab, offset: audioBufferSilenceOffset(ab) };
+    cacheSet(id, entry);
+    return entry;
   } catch {
+    // Undecodable by this browser: no samples to analyse, offset stays 0.
     const entry = { fallback: true, bytes };
     cacheSet(id, entry);
     return entry;
   }
+}
+
+/** Clip start offset (s) for a cached buffer — leading silence skipped. */
+function startOffsetOf(cached) {
+  if (!cached || cached.fallback || !cached.buffer) return 0;
+  const d = cached.buffer.duration;
+  const o = cached.offset || 0;
+  return o > 0 && o < d ? o : 0;
 }
 
 function cacheSet(id, value) {
@@ -215,27 +230,38 @@ function cacheSet(id, value) {
 }
 
 let activeStop = null;
+let activeVolumeSetter = null; // fn(0..1) — applies volume to whatever is audible right now
 let playToken = 0;
 function stopPlayback() {
   if (activeStop) {
     try { activeStop(); } catch {}
     activeStop = null;
   }
+  activeVolumeSetter = null;
 }
 
-/** Play the first `seconds` of the song from t=0. `volume` is 0..1. */
+/** Apply a 0..1 volume to the active source, if any. */
+function setLiveVolume(v) {
+  if (activeVolumeSetter) {
+    try { activeVolumeSetter(v); } catch {}
+  }
+}
+
+/** Play `seconds` of the song, starting at its first audible sample. `volume` is 0..1. */
 async function playClip(id, seconds, volume) {
   const token = ++playToken; // supersede any in-flight clip
   stopPlayback();
   state.playing = true;
   renderPlayButton();
+  const vol = Math.max(0, Math.min(1, volume));
   try {
     const cached = await loadBuffer(id);
     if (cached.fallback) {
       // Browser couldn't decode natively — stream via <audio> and cut with a timer.
       const url = URL.createObjectURL(new Blob([cached.bytes]));
       const el = new Audio(url);
-      el.volume = Math.max(0, Math.min(1, volume));
+      el.volume = vol;
+      activeVolumeSetter = (v) => { el.volume = v; };
       activeStop = () => {
         try { el.pause(); } catch {}
         try { URL.revokeObjectURL(url); } catch {}
@@ -245,12 +271,14 @@ async function playClip(id, seconds, volume) {
     } else {
       const ctx = await getCtx();
       const gain = ctx.createGain();
-      gain.gain.value = Math.max(0, Math.min(1, volume));
+      gain.gain.value = vol;
+      activeVolumeSetter = (v) => { gain.gain.value = v; };
       const src = ctx.createBufferSource();
-      src.buffer = cached;
+      src.buffer = cached.buffer;
       src.connect(gain);
       gain.connect(ctx.destination);
-      src.start(0, 0, Math.min(seconds, cached.duration));
+      const startAt = startOffsetOf(cached);
+      src.start(0, startAt, Math.min(seconds, cached.buffer.duration - startAt));
       activeStop = () => {
         try { src.stop(); } catch {}
       };
@@ -276,30 +304,33 @@ async function playWhole(id, volume) {
   try {
     const cached = await loadBuffer(id);
     if (token !== playToken) return; // user already left the screen
+    const vol = Math.max(0, Math.min(1, volume));
     if (cached.fallback) {
       const url = URL.createObjectURL(new Blob([cached.bytes]));
       const el = new Audio(url);
-      el.volume = Math.max(0, Math.min(1, volume));
+      el.volume = vol;
+      activeVolumeSetter = (v) => { el.volume = v; };
       const stop = () => {
         try { el.pause(); } catch {}
         try { URL.revokeObjectURL(url); } catch {}
       };
-      el.onended = () => { if (activeStop === stop) activeStop = null; stop(); };
+      el.onended = () => { if (activeStop === stop) { activeStop = null; activeVolumeSetter = null; } stop(); };
       await el.play();
       activeStop = stop;
     } else {
       const ctx = await getCtx();
       const gain = ctx.createGain();
-      gain.gain.value = Math.max(0, Math.min(1, volume));
+      gain.gain.value = vol;
+      activeVolumeSetter = (v) => { gain.gain.value = v; };
       const src = ctx.createBufferSource();
-      src.buffer = cached;
+      src.buffer = cached.buffer;
       src.connect(gain);
       gain.connect(ctx.destination);
       const stop = () => {
         try { src.stop(); } catch {}
       };
-      src.onended = () => { if (activeStop === stop) activeStop = null; };
-      src.start(0, 0);
+      src.onended = () => { if (activeStop === stop) { activeStop = null; activeVolumeSetter = null; } };
+      src.start(0, startOffsetOf(cached));
       activeStop = stop;
     }
   } catch {
@@ -529,6 +560,15 @@ function renderNextButton() {
   btn.disabled = maxed || state.resolved;
 }
 
+// The database stores romanised and unicode forms separately; the unicode
+// form is the prettier one, so prefer it for display.
+function displayTitle(song) {
+  return song.title_unicode || song.title;
+}
+function displayArtist(song) {
+  return song.artist_unicode || song.artist;
+}
+
 function renderResult(song, won, points, clipUsed) {
   const banner = $('#result-banner');
   banner.className = 'banner ' + (won ? 'won' : 'lost');
@@ -550,8 +590,8 @@ function renderResult(song, won, points, clipUsed) {
   }
 
   const beatmaps = song.beatmaps || [];
-  $('#result-title').textContent = song.title;
-  $('#result-artist').textContent = song.artist;
+  $('#result-title').textContent = displayTitle(song);
+  $('#result-artist').textContent = displayArtist(song);
 
   const mappers = new Set(
     [song.creator, ...beatmaps.map((b) => b.creator)].filter(Boolean),
@@ -629,8 +669,8 @@ function renderSuggest() {
       .map(
         (s, i) =>
           `<li data-id="${s.id}" class="${i === suggestSel ? 'sel' : ''}" role="option">
-             <span class="s-title">${esc(s.title)}</span>
-             <span class="s-sub">${esc(s.artist)}${s.creator ? ` · ${esc(s.creator)}` : ''}</span>
+             <span class="s-title">${esc(displayTitle(s))}</span>
+             <span class="s-sub">${esc(displayArtist(s))}${s.creator ? ` · ${esc(s.creator)}` : ''}</span>
            </li>`,
       )
       .join('');
@@ -681,7 +721,7 @@ function wireGuessInput() {
       e.preventDefault();
       if (suggestSel >= 0 && suggestItems[suggestSel]) {
         const item = suggestItems[suggestSel];
-        input.value = `${item.title} — ${item.artist}`;
+        input.value = `${displayTitle(item)} — ${displayArtist(item)}`;
         submitGuess(item.id);
       } else if (input.value.trim()) {
         submitGuess(null, input.value.trim());
@@ -762,6 +802,7 @@ function initVolume() {
   input.addEventListener('input', () => {
     state.volume = Number(input.value);
     label.textContent = `${state.volume}%`;
+    setLiveVolume(state.volume / 100); // affect whatever is playing right now
     save();
   });
 }

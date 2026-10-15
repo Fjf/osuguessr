@@ -49,11 +49,15 @@ test('parseOsuFile extracts core metadata', () => {
   const m = parseOsuFile(SAMPLE);
   assert.equal(m.audio, 'd41d8cd98f00b204e9800998ecf8427e');
   assert.equal(m.audioOriginal, 'Neon Skyline.mp3');
-  assert.equal(m.title, 'Néo Skÿline'); // unicode wins
-  assert.equal(m.artist, 'DJ Noïa');
+  // romanised and unicode forms are kept separately; the writer decides
+  assert.equal(m.title, 'Neon Skyline');
+  assert.equal(m.titleUnicode, 'Néo Skÿline');
+  assert.equal(m.artist, 'DJ Nova');
+  assert.equal(m.artistUnicode, 'DJ Noïa');
   assert.equal(m.source, 'Synthwave');
   assert.equal(m.creator, 'Mapper One');
   assert.equal(m.version, 'Insane');
+  assert.equal(m.previewTime, 384340);
   assert.equal(m.beatmapId, 1234567);
   assert.equal(m.beatmapSetId, 7654321);
   assert.equal(m.tags, 'synthwave neon night');

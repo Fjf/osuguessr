@@ -23,9 +23,26 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT || 8090);
 const HOST = process.env.HOST || '0.0.0.0';
-const SONGS_DIR = path.resolve(process.env.SONGS_DIR || path.join(__dirname, 'Songs'));
+
+// Library source: "stable" (default) or "lazer". In lazer mode the audio
+// lives in the files/ store inside the lazer data folder (OSU_DIR), next
+// to client.realm — the audio dir is ALWAYS OSU_DIR/files there (SONGS_DIR
+// is a stable-only knob).
+const OSU_SOURCE = (process.env.OSU_SOURCE || 'stable').toLowerCase();
+const OSU_DIR = process.env.OSU_DIR ? path.resolve(process.env.OSU_DIR) : null;
+if (OSU_SOURCE !== 'stable' && OSU_SOURCE !== 'lazer') {
+  console.warn(`[osuguessr] unknown OSU_SOURCE "${process.env.OSU_SOURCE}" — using stable`);
+}
+const SONGS_DIR = path.resolve(
+  OSU_SOURCE === 'lazer'
+    ? OSU_DIR
+      ? path.join(OSU_DIR, 'files')
+      : path.join(__dirname, 'Songs')
+    : process.env.SONGS_DIR || path.join(__dirname, 'Songs'),
+);
 const BEATMAPS_DIR = path.resolve(
-  process.env.BEATMAPS_DIR || path.dirname(SONGS_DIR),
+  process.env.BEATMAPS_DIR ||
+    (OSU_SOURCE === 'lazer' && OSU_DIR ? OSU_DIR : path.dirname(SONGS_DIR)),
 );
 const DB_PATH = path.resolve(
   process.env.DB_PATH || path.join(__dirname, 'data', 'osuguessr.db'),
@@ -52,6 +69,7 @@ const indexState = {
 
 const PHASE_LABELS = {
   start: 'starting',
+  realm: 'opening beatmap database',
   songs: 'scanning audio files',
   beatmaps: 'scanning beatmaps',
   tags: 'reading audio tags',
@@ -100,6 +118,8 @@ async function startRebuild() {
       songsDir: SONGS_DIR,
       beatmapsDir: BEATMAPS_DIR,
       useTags: USE_TAGS,
+      source: OSU_SOURCE,
+      osuDir: OSU_DIR,
       onProgress: (p) => {
         indexState.phase = p.phase;
         indexState.done = p.done ?? 0;
@@ -197,8 +217,9 @@ function indexStatus() {
     lastError: indexState.error,
     summary: indexState.summary,
     ...stats,
+    source: OSU_SOURCE,
     songsDir: SONGS_DIR,
-    beatmapsDir: BEATMAPS_DIR,
+    beatmapsDir: OSU_SOURCE === 'lazer' ? null : BEATMAPS_DIR,
     useTags: USE_TAGS,
   };
 }
@@ -342,7 +363,8 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, HOST, () => {
   console.log(`[osuguessr] listening on http://${HOST}:${PORT}`);
+  console.log(`[osuguessr] source:     ${OSU_SOURCE}${OSU_SOURCE === 'lazer' && OSU_DIR ? ` (osu dir: ${OSU_DIR})` : ''}`);
   console.log(`[osuguessr] songs dir:  ${SONGS_DIR}`);
-  console.log(`[osuguessr] beatmaps:   ${BEATMAPS_DIR}`);
+  if (OSU_SOURCE !== 'lazer') console.log(`[osuguessr] beatmaps:   ${BEATMAPS_DIR}`);
   console.log(`[osuguessr] db:         ${DB_PATH}`);
 });
